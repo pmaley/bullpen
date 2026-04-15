@@ -7,6 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0f1114">
 <title>Bullpen Tracker</title>
+<link rel="manifest" href="data:application/json;base64,ewogICJuYW1lIjogIkJ1bGxwZW4gVHJhY2tlciIsCiAgInNob3J0X25hbWUiOiAiQnVsbHBlbiIsCiAgInN0YXJ0X3VybCI6ICIuIiwKICAiZGlzcGxheSI6ICJzdGFuZGFsb25lIiwKICAiYmFja2dyb3VuZF9jb2xvciI6ICIjMGYxMTE0IiwKICAidGhlbWVfY29sb3IiOiAiIzBmMTExNCIsCiAgImljb25zIjogW3sKICAgICJzcmMiOiAiZGF0YTppbWFnZS9zdmcreG1sLDxzdmcgeG1sbnM9J2h0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnJyB3aWR0aD0nMTkyJyBoZWlnaHQ9JzE5Mic+PHJlY3Qgd2lkdGg9JzE5MicgaGVpZ2h0PScxOTInIGZpbGw9JyUyMzBmMTExNCcgcng9JzMyJy8+PHRleHQgeD0nOTYnIHk9JzEyMCcgZm9udC1zaXplPSc5NicgdGV4dC1hbmNob3I9J21pZGRsZSc+4pq+PC90ZXh0Pjwvc3ZnPiIsCiAgICAic2l6ZXMiOiAiMTkyeDE5MiIsCiAgICAidHlwZSI6ICJpbWFnZS9zdmcreG1sIgogIH1dCn0=">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Passion+One:wght@400;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -53,6 +54,56 @@
 <script type="text/babel" data-type="module">
 const { useState, useEffect, useRef, useCallback } = React;
 
+// ─── Audio Feedback ───
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new AudioCtx();
+  return audioCtx;
+}
+
+function playTone(freq, duration, type = "sine") {
+  try {
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, ctx.currentTime);
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + duration);
+  } catch(e) {}
+}
+
+function playStrikeSound() {
+  playTone(880, 0.12, "square");
+  setTimeout(() => playTone(1100, 0.15, "square"), 80);
+}
+
+function playBallSound() {
+  playTone(440, 0.15, "sine");
+  setTimeout(() => playTone(330, 0.2, "sine"), 100);
+}
+
+function playUndoSound() {
+  playTone(500, 0.1, "triangle");
+  setTimeout(() => playTone(400, 0.15, "triangle"), 80);
+}
+
+// ─── Text-to-Speech ───
+function speak(text) {
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.1;
+    u.pitch = 1.0;
+    u.volume = 1.0;
+    speechSynthesis.speak(u);
+  } catch(e) {}
+}
+
 // ─── Storage via localStorage ───
 const STORAGE_KEY = "bullpen-tracker-data";
 
@@ -74,7 +125,7 @@ function uid() {
 }
 
 // ─── Voice Recognition Hook ───
-function useVoiceRecognition(onBall, onStrike, enabled) {
+function useVoiceRecognition(onBall, onStrike, onUndo, onPitchCount, enabled) {
   const recRef = useRef(null);
   const enabledRef = useRef(enabled);
   const listening = useRef(false);
@@ -91,18 +142,26 @@ function useVoiceRecognition(onBall, onStrike, enabled) {
     rec.continuous = true;
     rec.interimResults = false;
     rec.lang = "en-US";
-    rec.maxAlternatives = 1;
+    rec.maxAlternatives = 3;
 
     rec.onresult = (e) => {
       if (!enabledRef.current) return;
       for (let i = e.resultIndex; i < e.results.length; i++) {
         if (!e.results[i].isFinal) continue;
-        const t = e.results[i][0].transcript.toLowerCase().trim();
-        const words = t.split(/\s+/);
-        if (words.length === 1 && words[0] === "ball") onBall();
-        else if (words.length === 1 && words[0] === "strike") onStrike();
-        else if (words.length === 2 && words[0] === "add" && words[1] === "ball") onBall();
-        else if (words.length === 2 && words[0] === "add" && words[1] === "strike") onStrike();
+        // Check all alternatives for best match
+        let matched = false;
+        for (let a = 0; a < e.results[i].length && !matched; a++) {
+          const t = e.results[i][a].transcript.toLowerCase().trim();
+          const words = t.split(/\s+/);
+          
+          if (words.length === 1 && words[0] === "ball") { onBall(); matched = true; }
+          else if (words.length === 1 && words[0] === "strike") { onStrike(); matched = true; }
+          else if (words.length === 2 && words[0] === "add" && words[1] === "ball") { onBall(); matched = true; }
+          else if (words.length === 2 && words[0] === "add" && words[1] === "strike") { onStrike(); matched = true; }
+          else if (words.length === 1 && words[0] === "undo") { onUndo(); matched = true; }
+          else if (words.length === 2 && words[0] === "pitch" && words[1] === "count") { onPitchCount(); matched = true; }
+          else if (words.length === 1 && (words[0] === "bawl" || words[0] === "bald" || words[0] === "paul" || words[0] === "baal")) { onBall(); matched = true; }
+        }
       }
     };
 
@@ -119,7 +178,7 @@ function useVoiceRecognition(onBall, onStrike, enabled) {
     rec.start();
     listening.current = true;
     setIsListening(true);
-  }, [onBall, onStrike]);
+  }, [onBall, onStrike, onUndo, onPitchCount]);
 
   const stop = useCallback(() => {
     listening.current = false;
@@ -128,6 +187,8 @@ function useVoiceRecognition(onBall, onStrike, enabled) {
   }, []);
 
   const toggle = useCallback(() => {
+    // Initialize audio context on user gesture
+    getAudioCtx();
     if (listening.current) stop(); else start();
   }, [start, stop]);
 
@@ -208,6 +269,22 @@ function ConfirmModal({ message, onConfirm, onCancel }) {
   );
 }
 
+// ─── Toast Notification ───
+function Toast({ message, visible }) {
+  if (!visible) return null;
+  return (
+    <div style={{
+      position: "fixed", top: 60, left: "50%", transform: "translateX(-50%)",
+      background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12,
+      padding: "12px 24px", zIndex: 1001, color: "var(--text-1)", fontFamily: "var(--font-body)",
+      fontSize: 14, fontWeight: 600, boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+      animation: "slideUp 0.2s ease"
+    }}>
+      {message}
+    </div>
+  );
+}
+
 // ─── Main App ───
 
 function BullpenTracker() {
@@ -220,6 +297,15 @@ function BullpenTracker() {
   const [newPitcherName, setNewPitcherName] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [flashType, setFlashType] = useState(null);
+  const [toast, setToast] = useState({ message: "", visible: false });
+  
+  // Track last action for undo
+  const lastActionRef = useRef(null); // "ball" | "strike"
+
+  const showToast = (msg) => {
+    setToast({ message: msg, visible: true });
+    setTimeout(() => setToast({ message: "", visible: false }), 1800);
+  };
 
   // Load
   useEffect(() => {
@@ -243,6 +329,8 @@ function BullpenTracker() {
     setActiveSession(prev => {
       if (!prev) return prev;
       flash("ball");
+      playBallSound();
+      lastActionRef.current = "ball";
       return { ...prev, balls: prev.balls + 1 };
     });
   }, []);
@@ -251,12 +339,56 @@ function BullpenTracker() {
     setActiveSession(prev => {
       if (!prev) return prev;
       flash("strike");
+      playStrikeSound();
+      lastActionRef.current = "strike";
       return { ...prev, strikes: prev.strikes + 1 };
     });
   }, []);
 
+  const undoLast = useCallback(() => {
+    setActiveSession(prev => {
+      if (!prev) return prev;
+      const action = lastActionRef.current;
+      if (action === "strike" && prev.strikes > 0) {
+        playUndoSound();
+        showToast("Undo strike");
+        lastActionRef.current = null;
+        return { ...prev, strikes: prev.strikes - 1 };
+      } else if (action === "ball" && prev.balls > 0) {
+        playUndoSound();
+        showToast("Undo ball");
+        lastActionRef.current = null;
+        return { ...prev, balls: prev.balls - 1 };
+      } else if (!action) {
+        // No tracked action, try strikes first then balls
+        if (prev.strikes > 0) {
+          playUndoSound();
+          showToast("Undo strike");
+          return { ...prev, strikes: prev.strikes - 1 };
+        } else if (prev.balls > 0) {
+          playUndoSound();
+          showToast("Undo ball");
+          return { ...prev, balls: prev.balls - 1 };
+        }
+      }
+      return prev;
+    });
+  }, []);
+
+  const sayPitchCount = useCallback(() => {
+    setActiveSession(prev => {
+      if (!prev) return prev;
+      const total = prev.balls + prev.strikes;
+      const pct = total > 0 ? Math.round((prev.strikes / total) * 100) : 0;
+      const msg = `${total} pitches. ${prev.strikes} strikes, ${prev.balls} balls. ${pct} percent strikes.`;
+      speak(msg);
+      showToast(`${total} pitches · ${prev.strikes}K / ${prev.balls}B · ${pct}%`);
+      return prev;
+    });
+  }, []);
+
   const voiceEnabled = view === "active-session" && !!activeSession;
-  const voice = useVoiceRecognition(addBall, addStrike, voiceEnabled);
+  const voice = useVoiceRecognition(addBall, addStrike, undoLast, sayPitchCount, voiceEnabled);
 
   const createPitcher = () => {
     const name = newPitcherName.trim();
@@ -282,6 +414,7 @@ function BullpenTracker() {
       }
       if (voice.isListening) voice.toggle();
       setActiveSession(null);
+      lastActionRef.current = null;
       setView("pitcher-detail");
     }
   };
@@ -304,7 +437,7 @@ function BullpenTracker() {
 
   if (!loaded) return <div style={{ minHeight: "100vh", background: "var(--bg)" }} />;
 
-  const cs = { // common styles
+  const cs = {
     card: { background: "var(--surface-1)", border: "1px solid var(--border)", borderRadius: 14, padding: 18, marginBottom: 12 },
     btnPrimary: { background: "var(--amber)", color: "#0f1114", border: "none", borderRadius: 12, padding: "14px 24px", fontFamily: "var(--font-body)", fontSize: 16, fontWeight: 700, cursor: "pointer", width: "100%", letterSpacing: 0.3 },
     btnSecondary: { background: "var(--surface-2)", color: "var(--text-1)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 20px", fontFamily: "var(--font-body)", fontSize: 15, fontWeight: 600, cursor: "pointer" },
@@ -315,6 +448,8 @@ function BullpenTracker() {
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text-1)", fontFamily: "var(--font-body)", maxWidth: 480, margin: "0 auto", position: "relative", overflow: "hidden" }}>
       
+      <Toast message={toast.message} visible={toast.visible} />
+
       {flashType && (
         <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 999, animation: flashType === "ball" ? "flashBall 0.35s ease forwards" : "flashStrike 0.35s ease forwards" }} />
       )}
@@ -489,8 +624,12 @@ function BullpenTracker() {
           </div>
 
           <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-            <button onClick={() => setActiveSession(p => p.strikes > 0 ? { ...p, strikes: p.strikes - 1 } : p)} disabled={activeSession.strikes === 0} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: activeSession.strikes > 0 ? "var(--text-3)" : "var(--text-4)", fontFamily: "var(--font-body)", fontSize: 13, cursor: "pointer" }}>Undo Strike</button>
-            <button onClick={() => setActiveSession(p => p.balls > 0 ? { ...p, balls: p.balls - 1 } : p)} disabled={activeSession.balls === 0} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: activeSession.balls > 0 ? "var(--text-3)" : "var(--text-4)", fontFamily: "var(--font-body)", fontSize: 13, cursor: "pointer" }}>Undo Ball</button>
+            <button onClick={() => { setActiveSession(p => p.strikes > 0 ? (playUndoSound(), { ...p, strikes: p.strikes - 1 }) : p); }}
+              disabled={activeSession.strikes === 0}
+              style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: activeSession.strikes > 0 ? "var(--text-3)" : "var(--text-4)", fontFamily: "var(--font-body)", fontSize: 13, cursor: "pointer" }}>Undo Strike</button>
+            <button onClick={() => { setActiveSession(p => p.balls > 0 ? (playUndoSound(), { ...p, balls: p.balls - 1 }) : p); }}
+              disabled={activeSession.balls === 0}
+              style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: activeSession.balls > 0 ? "var(--text-3)" : "var(--text-4)", fontFamily: "var(--font-body)", fontSize: 13, cursor: "pointer" }}>Undo Ball</button>
           </div>
 
           {voice.hasSupport && (
@@ -504,11 +643,11 @@ function BullpenTracker() {
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 8
               }}>
                 <PulseIndicator active={voice.isListening} />
-                {voice.isListening ? 'Voice Active — say "strike" or "ball"' : "Enable Voice Commands"}
+                {voice.isListening ? 'Voice Active' : "Enable Voice Commands"}
               </button>
               {voice.isListening && (
-                <p style={{ textAlign: "center", color: "var(--text-4)", fontSize: 12, marginTop: 8 }}>
-                  Say just "strike" or "ball" — full sentences are ignored
+                <p style={{ textAlign: "center", color: "var(--text-4)", fontSize: 12, marginTop: 8, lineHeight: 1.6 }}>
+                  "strike" · "ball" · "undo" · "pitch count"
                 </p>
               )}
             </div>
