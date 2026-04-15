@@ -104,6 +104,35 @@ function speak(text) {
   } catch(e) {}
 }
 
+// ─── Screen Wake Lock ───
+let wakeLockSentinel = null;
+
+async function acquireWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request("screen");
+    wakeLockSentinel.addEventListener("release", () => {
+      wakeLockSentinel = null;
+    });
+  } catch(e) {
+    console.log("Wake lock failed:", e.message);
+  }
+}
+
+async function releaseWakeLock() {
+  if (wakeLockSentinel) {
+    try { await wakeLockSentinel.release(); } catch(e) {}
+    wakeLockSentinel = null;
+  }
+}
+
+// Re-acquire on tab visibility change
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && wakeLockSentinel === null && window._wakeLockDesired) {
+    acquireWakeLock();
+  }
+});
+
 // ─── Storage via localStorage ───
 const STORAGE_KEY = "bullpen-tracker-data";
 
@@ -124,6 +153,52 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+// ─── Word matching sets ───
+// "Ball" is a short single-syllable word that speech recognition frequently mishears.
+// We accept a wide range of common misrecognitions to improve reliability.
+const BALL_WORDS = new Set([
+  "ball", "bawl", "bald", "paul", "bull", "bowl", "bol",
+  "baal", "baul", "bal", "boll", "bole", "boal", "baw",
+  "fall", "call", "all", "hall", "wall", "tall", "mall",
+  "y'all", "law", "pall", "pawl", "maul", "pol", "doll",
+  "bahl", "boll", "bole", "ball's", "balls",
+  "bought", "bot", "bolt", "baht",
+  "bar", "bore", "raw", "bra"
+]);
+
+const STRIKE_WORDS = new Set([
+  "strike", "struck", "strait", "stripe", "strife", "strive",
+  "strikes", "tribe", "strik", "trike"
+]);
+
+const UNDO_WORDS = new Set([
+  "undo", "un do", "and do", "i'm do", "on do", "unto",
+  "and due", "on due", "undo", "un-do"
+]);
+
+function matchCommand(words) {
+  const joined = words.join(" ");
+
+  // Single word matches
+  if (words.length === 1) {
+    if (BALL_WORDS.has(words[0])) return "ball";
+    if (STRIKE_WORDS.has(words[0])) return "strike";
+    if (UNDO_WORDS.has(words[0])) return "undo";
+  }
+
+  // Two word matches
+  if (words.length === 2) {
+    if (words[0] === "add" && BALL_WORDS.has(words[1])) return "ball";
+    if (words[0] === "add" && STRIKE_WORDS.has(words[1])) return "strike";
+    if (joined === "pitch count" || joined === "pitch counts" || joined === "it count" || joined === "beach count" || joined === "pics count" || joined === "bitch count") return "pitchcount";
+    if (UNDO_WORDS.has(joined)) return "undo";
+  }
+
+  if (words.length <= 3 && joined.includes("pitch count")) return "pitchcount";
+
+  return null;
+}
+
 // ─── Voice Recognition Hook ───
 function useVoiceRecognition(onBall, onStrike, onUndo, onPitchCount, enabled) {
   const recRef = useRef(null);
@@ -142,25 +217,21 @@ function useVoiceRecognition(onBall, onStrike, onUndo, onPitchCount, enabled) {
     rec.continuous = true;
     rec.interimResults = false;
     rec.lang = "en-US";
-    rec.maxAlternatives = 3;
+    rec.maxAlternatives = 5;
 
     rec.onresult = (e) => {
       if (!enabledRef.current) return;
       for (let i = e.resultIndex; i < e.results.length; i++) {
         if (!e.results[i].isFinal) continue;
-        // Check all alternatives for best match
         let matched = false;
         for (let a = 0; a < e.results[i].length && !matched; a++) {
           const t = e.results[i][a].transcript.toLowerCase().trim();
           const words = t.split(/\s+/);
-          
-          if (words.length === 1 && words[0] === "ball") { onBall(); matched = true; }
-          else if (words.length === 1 && words[0] === "strike") { onStrike(); matched = true; }
-          else if (words.length === 2 && words[0] === "add" && words[1] === "ball") { onBall(); matched = true; }
-          else if (words.length === 2 && words[0] === "add" && words[1] === "strike") { onStrike(); matched = true; }
-          else if (words.length === 1 && words[0] === "undo") { onUndo(); matched = true; }
-          else if (words.length === 2 && words[0] === "pitch" && words[1] === "count") { onPitchCount(); matched = true; }
-          else if (words.length === 1 && (words[0] === "bawl" || words[0] === "bald" || words[0] === "paul" || words[0] === "baal")) { onBall(); matched = true; }
+          const cmd = matchCommand(words);
+          if (cmd === "ball") { onBall(); matched = true; }
+          else if (cmd === "strike") { onStrike(); matched = true; }
+          else if (cmd === "undo") { onUndo(); matched = true; }
+          else if (cmd === "pitchcount") { onPitchCount(); matched = true; }
         }
       }
     };
@@ -187,7 +258,6 @@ function useVoiceRecognition(onBall, onStrike, onUndo, onPitchCount, enabled) {
   }, []);
 
   const toggle = useCallback(() => {
-    // Initialize audio context on user gesture
     getAudioCtx();
     if (listening.current) stop(); else start();
   }, [start, stop]);
@@ -269,7 +339,6 @@ function ConfirmModal({ message, onConfirm, onCancel }) {
   );
 }
 
-// ─── Toast Notification ───
 function Toast({ message, visible }) {
   if (!visible) return null;
   return (
@@ -278,7 +347,7 @@ function Toast({ message, visible }) {
       background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12,
       padding: "12px 24px", zIndex: 1001, color: "var(--text-1)", fontFamily: "var(--font-body)",
       fontSize: 14, fontWeight: 600, boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-      animation: "slideUp 0.2s ease"
+      animation: "slideUp 0.2s ease", whiteSpace: "nowrap"
     }}>
       {message}
     </div>
@@ -298,23 +367,20 @@ function BullpenTracker() {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [flashType, setFlashType] = useState(null);
   const [toast, setToast] = useState({ message: "", visible: false });
-  
-  // Track last action for undo
-  const lastActionRef = useRef(null); // "ball" | "strike"
+  const [wakeLockActive, setWakeLockActive] = useState(false);
+  const lastActionRef = useRef(null);
 
   const showToast = (msg) => {
     setToast({ message: msg, visible: true });
     setTimeout(() => setToast({ message: "", visible: false }), 1800);
   };
 
-  // Load
   useEffect(() => {
     const data = loadFromStorage();
     if (data) { setPitchers(data.pitchers || []); setSessions(data.sessions || []); }
     setLoaded(true);
   }, []);
 
-  // Save
   useEffect(() => {
     if (!loaded) return;
     saveToStorage({ pitchers, sessions });
@@ -360,7 +426,6 @@ function BullpenTracker() {
         lastActionRef.current = null;
         return { ...prev, balls: prev.balls - 1 };
       } else if (!action) {
-        // No tracked action, try strikes first then balls
         if (prev.strikes > 0) {
           playUndoSound();
           showToast("Undo strike");
@@ -405,6 +470,8 @@ function BullpenTracker() {
     setActiveSession(s);
     setSelectedPitcher(pitcher);
     setView("active-session");
+    window._wakeLockDesired = true;
+    acquireWakeLock().then(() => setWakeLockActive(true));
   };
 
   const endSession = () => {
@@ -415,6 +482,8 @@ function BullpenTracker() {
       if (voice.isListening) voice.toggle();
       setActiveSession(null);
       lastActionRef.current = null;
+      window._wakeLockDesired = false;
+      releaseWakeLock().then(() => setWakeLockActive(false));
       setView("pitcher-detail");
     }
   };
@@ -593,7 +662,10 @@ function BullpenTracker() {
         <div style={{ padding: "24px 20px", minHeight: "100vh", display: "flex", flexDirection: "column" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <div>
-              <div style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1, fontWeight: 600 }}>BULLPEN SESSION</div>
+              <div style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1, fontWeight: 600 }}>
+                BULLPEN SESSION
+                {wakeLockActive && <span style={{ color: "var(--green)", marginLeft: 8, fontSize: 10 }}>● SCREEN ON</span>}
+              </div>
               <div style={{ fontFamily: "var(--font-display)", fontSize: 22, color: "var(--text-1)", marginTop: 2 }}>{selectedPitcher?.name}</div>
             </div>
             <button onClick={endSession} style={{ ...cs.btnSecondary, padding: "10px 18px", fontSize: 14 }}>End Session</button>
