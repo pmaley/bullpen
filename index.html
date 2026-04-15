@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f1114">
+<title>Bullpen Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Passion+One:wght@400;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0f1114;
+    --surface-1: #1a1d23;
+    --surface-2: #252830;
+    --surface-3: #2f333d;
+    --border: #333842;
+    --amber: #e8a020;
+    --amber-glow: rgba(232, 160, 32, 0.15);
+    --green: #34c759;
+    --green-dim: rgba(52, 199, 89, 0.15);
+    --red: #e05252;
+    --red-dim: rgba(224, 82, 82, 0.15);
+    --blue: #5a9cf5;
+    --blue-dim: rgba(90, 156, 245, 0.12);
+    --text-1: #f0ece4;
+    --text-2: #b0a998;
+    --text-3: #7a7368;
+    --text-4: #4a453f;
+    --font-display: 'Passion One', 'Impact', sans-serif;
+    --font-body: 'DM Sans', 'Helvetica Neue', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { 
+    height: 100%; width: 100%; background: var(--bg); 
+    overflow-x: hidden; -webkit-tap-highlight-color: transparent;
+  }
+  body { font-family: var(--font-body); color: var(--text-1); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes flashBall { 0% { background: var(--blue-dim); } 100% { background: transparent; } }
+  @keyframes flashStrike { 0% { background: var(--amber-glow); } 100% { background: transparent; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ─── Storage via localStorage ───
+const STORAGE_KEY = "bullpen-tracker-data";
+
+function loadFromStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function saveToStorage(data) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (e) { console.error("Save failed", e); }
+}
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// ─── Voice Recognition Hook ───
+function useVoiceRecognition(onBall, onStrike, enabled) {
+  const recRef = useRef(null);
+  const enabledRef = useRef(enabled);
+  const listening = useRef(false);
+  const [isListening, setIsListening] = useState(false);
+
+  useEffect(() => { enabledRef.current = enabled; }, [enabled]);
+
+  const start = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    if (recRef.current) { try { recRef.current.abort(); } catch(e){} }
+
+    const rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.lang = "en-US";
+    rec.maxAlternatives = 1;
+
+    rec.onresult = (e) => {
+      if (!enabledRef.current) return;
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (!e.results[i].isFinal) continue;
+        const t = e.results[i][0].transcript.toLowerCase().trim();
+        const words = t.split(/\s+/);
+        if (words.length === 1 && words[0] === "ball") onBall();
+        else if (words.length === 1 && words[0] === "strike") onStrike();
+        else if (words.length === 2 && words[0] === "add" && words[1] === "ball") onBall();
+        else if (words.length === 2 && words[0] === "add" && words[1] === "strike") onStrike();
+      }
+    };
+
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed") { listening.current = false; setIsListening(false); return; }
+      if (listening.current) setTimeout(() => { if (listening.current) start(); }, 500);
+    };
+
+    rec.onend = () => {
+      if (listening.current) setTimeout(() => { if (listening.current) start(); }, 200);
+    };
+
+    recRef.current = rec;
+    rec.start();
+    listening.current = true;
+    setIsListening(true);
+  }, [onBall, onStrike]);
+
+  const stop = useCallback(() => {
+    listening.current = false;
+    setIsListening(false);
+    if (recRef.current) { try { recRef.current.abort(); } catch(e){} recRef.current = null; }
+  }, []);
+
+  const toggle = useCallback(() => {
+    if (listening.current) stop(); else start();
+  }, [start, stop]);
+
+  useEffect(() => () => { listening.current = false; if (recRef.current) try { recRef.current.abort(); } catch(e){} }, []);
+
+  return { isListening, toggle, hasSupport: !!(window.SpeechRecognition || window.webkitSpeechRecognition) };
+}
+
+// ─── Components ───
+
+function StrikePercentage({ balls, strikes }) {
+  const total = balls + strikes;
+  const pct = total === 0 ? 0 : Math.round((strikes / total) * 100);
+  const circumference = 2 * Math.PI * 54;
+  const offset = circumference - (pct / 100) * circumference;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+      <svg width="140" height="140" viewBox="0 0 120 120">
+        <circle cx="60" cy="60" r="54" fill="none" stroke="var(--surface-2)" strokeWidth="8" />
+        <circle cx="60" cy="60" r="54" fill="none"
+          stroke={pct >= 60 ? "var(--green)" : pct >= 50 ? "var(--amber)" : "var(--red)"}
+          strokeWidth="8" strokeLinecap="round"
+          strokeDasharray={circumference} strokeDashoffset={offset}
+          transform="rotate(-90 60 60)"
+          style={{ transition: "stroke-dashoffset 0.6s ease, stroke 0.4s ease" }} />
+        <text x="60" y="54" textAnchor="middle" fill="var(--text-1)" fontFamily="var(--font-display)" fontSize="28" fontWeight="700">
+          {pct}%
+        </text>
+        <text x="60" y="74" textAnchor="middle" fill="var(--text-3)" fontFamily="var(--font-body)" fontSize="11" letterSpacing="0.5">
+          STRIKES
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+function PulseIndicator({ active }) {
+  return (
+    <span style={{
+      display: "inline-block", width: 10, height: 10, borderRadius: "50%",
+      background: active ? "var(--red)" : "var(--text-4)",
+      boxShadow: active ? "0 0 8px var(--red)" : "none",
+      animation: active ? "pulse 1.5s ease infinite" : "none",
+      marginRight: 8, verticalAlign: "middle"
+    }} />
+  );
+}
+
+function ConfirmModal({ message, onConfirm, onCancel }) {
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex",
+      alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 24
+    }}>
+      <div style={{
+        background: "var(--surface-1)", borderRadius: 16, padding: "32px 28px",
+        maxWidth: 340, width: "100%", textAlign: "center",
+        border: "1px solid var(--border)"
+      }}>
+        <p style={{ fontFamily: "var(--font-body)", color: "var(--text-1)", fontSize: 16, margin: "0 0 28px", lineHeight: 1.5 }}>
+          {message}
+        </p>
+        <div style={{ display: "flex", gap: 12 }}>
+          <button onClick={onCancel} style={{
+            flex: 1, padding: "12px 0", borderRadius: 10, border: "1px solid var(--border)",
+            background: "transparent", color: "var(--text-2)", fontFamily: "var(--font-body)",
+            fontSize: 15, cursor: "pointer"
+          }}>Cancel</button>
+          <button onClick={onConfirm} style={{
+            flex: 1, padding: "12px 0", borderRadius: 10, border: "none",
+            background: "var(--red)", color: "#fff", fontFamily: "var(--font-body)",
+            fontSize: 15, fontWeight: 600, cursor: "pointer"
+          }}>Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ───
+
+function BullpenTracker() {
+  const [pitchers, setPitchers] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [view, setView] = useState("home");
+  const [selectedPitcher, setSelectedPitcher] = useState(null);
+  const [activeSession, setActiveSession] = useState(null);
+  const [newPitcherName, setNewPitcherName] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [flashType, setFlashType] = useState(null);
+
+  // Load
+  useEffect(() => {
+    const data = loadFromStorage();
+    if (data) { setPitchers(data.pitchers || []); setSessions(data.sessions || []); }
+    setLoaded(true);
+  }, []);
+
+  // Save
+  useEffect(() => {
+    if (!loaded) return;
+    saveToStorage({ pitchers, sessions });
+  }, [pitchers, sessions, loaded]);
+
+  const flash = (type) => {
+    setFlashType(type);
+    setTimeout(() => setFlashType(null), 350);
+  };
+
+  const addBall = useCallback(() => {
+    setActiveSession(prev => {
+      if (!prev) return prev;
+      flash("ball");
+      return { ...prev, balls: prev.balls + 1 };
+    });
+  }, []);
+
+  const addStrike = useCallback(() => {
+    setActiveSession(prev => {
+      if (!prev) return prev;
+      flash("strike");
+      return { ...prev, strikes: prev.strikes + 1 };
+    });
+  }, []);
+
+  const voiceEnabled = view === "active-session" && !!activeSession;
+  const voice = useVoiceRecognition(addBall, addStrike, voiceEnabled);
+
+  const createPitcher = () => {
+    const name = newPitcherName.trim();
+    if (!name) return;
+    const p = { id: uid(), name, createdAt: Date.now() };
+    setPitchers(prev => [...prev, p]);
+    setNewPitcherName("");
+    setSelectedPitcher(p);
+    setView("pitcher-detail");
+  };
+
+  const startSession = (pitcher) => {
+    const s = { id: uid(), pitcherId: pitcher.id, date: Date.now(), balls: 0, strikes: 0 };
+    setActiveSession(s);
+    setSelectedPitcher(pitcher);
+    setView("active-session");
+  };
+
+  const endSession = () => {
+    if (activeSession) {
+      if (activeSession.balls + activeSession.strikes > 0) {
+        setSessions(prev => [...prev, { ...activeSession }]);
+      }
+      if (voice.isListening) voice.toggle();
+      setActiveSession(null);
+      setView("pitcher-detail");
+    }
+  };
+
+  const deleteSession = (sid) => {
+    setSessions(prev => prev.filter(s => s.id !== sid));
+    setConfirmDelete(null);
+  };
+
+  const deletePitcher = (pid) => {
+    setPitchers(prev => prev.filter(p => p.id !== pid));
+    setSessions(prev => prev.filter(s => s.pitcherId !== pid));
+    setConfirmDelete(null);
+    setView("home");
+  };
+
+  const pitcherSessions = (pid) => sessions.filter(s => s.pitcherId === pid).sort((a, b) => b.date - a.date);
+  const fmtDate = (ts) => new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const fmtTime = (ts) => new Date(ts).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+
+  if (!loaded) return <div style={{ minHeight: "100vh", background: "var(--bg)" }} />;
+
+  const cs = { // common styles
+    card: { background: "var(--surface-1)", border: "1px solid var(--border)", borderRadius: 14, padding: 18, marginBottom: 12 },
+    btnPrimary: { background: "var(--amber)", color: "#0f1114", border: "none", borderRadius: 12, padding: "14px 24px", fontFamily: "var(--font-body)", fontSize: 16, fontWeight: 700, cursor: "pointer", width: "100%", letterSpacing: 0.3 },
+    btnSecondary: { background: "var(--surface-2)", color: "var(--text-1)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 20px", fontFamily: "var(--font-body)", fontSize: 15, fontWeight: 600, cursor: "pointer" },
+    backBtn: { background: "none", border: "none", color: "var(--text-3)", fontSize: 15, cursor: "pointer", fontFamily: "var(--font-body)", padding: "4px 0", marginBottom: 24 },
+    input: { width: "100%", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", color: "var(--text-1)", fontFamily: "var(--font-body)", fontSize: 16, outline: "none" },
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text-1)", fontFamily: "var(--font-body)", maxWidth: 480, margin: "0 auto", position: "relative", overflow: "hidden" }}>
+      
+      {flashType && (
+        <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 999, animation: flashType === "ball" ? "flashBall 0.35s ease forwards" : "flashStrike 0.35s ease forwards" }} />
+      )}
+
+      {confirmDelete && (
+        <ConfirmModal message={confirmDelete.message} onConfirm={confirmDelete.onConfirm} onCancel={() => setConfirmDelete(null)} />
+      )}
+
+      {/* ═══════ HOME ═══════ */}
+      {view === "home" && (
+        <div style={{ padding: "24px 20px" }}>
+          <div style={{ textAlign: "center", marginBottom: 32, paddingTop: 12 }}>
+            <div style={{ fontSize: 36, marginBottom: 4 }}>⚾</div>
+            <h1 style={{ fontFamily: "var(--font-display)", fontSize: 34, fontWeight: 700, letterSpacing: 1, color: "var(--amber)", margin: 0 }}>BULLPEN</h1>
+            <p style={{ color: "var(--text-3)", fontSize: 13, letterSpacing: 2, marginTop: 2 }}>PITCH TRACKER</p>
+          </div>
+
+          {pitchers.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "48px 20px" }}>
+              <p style={{ color: "var(--text-3)", fontSize: 15, marginBottom: 8 }}>No pitchers yet</p>
+              <p style={{ color: "var(--text-4)", fontSize: 13 }}>Add a pitcher to get started</p>
+            </div>
+          ) : (
+            <div>
+              <p style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1.5, marginBottom: 14, fontWeight: 600 }}>PITCHERS</p>
+              {pitchers.map((p, i) => {
+                const ps = pitcherSessions(p.id);
+                const totalStrikes = ps.reduce((a, s) => a + s.strikes, 0);
+                const totalPitches = ps.reduce((a, s) => a + s.balls + s.strikes, 0);
+                const pct = totalPitches > 0 ? Math.round((totalStrikes / totalPitches) * 100) : null;
+                return (
+                  <div key={p.id} style={{ ...cs.card, cursor: "pointer", animation: `slideUp 0.3s ease ${i * 0.05}s both` }}
+                    onClick={() => { setSelectedPitcher(p); setView("pitcher-detail"); }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 17 }}>{p.name}</div>
+                        <div style={{ color: "var(--text-3)", fontSize: 13, marginTop: 3 }}>
+                          {ps.length} session{ps.length !== 1 ? "s" : ""}
+                          {totalPitches > 0 && <span> · {totalPitches} pitches</span>}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        {pct !== null ? (
+                          <span style={{ fontFamily: "var(--font-display)", fontSize: 26, color: pct >= 60 ? "var(--green)" : pct >= 50 ? "var(--amber)" : "var(--red)" }}>{pct}%</span>
+                        ) : (
+                          <span style={{ color: "var(--text-4)", fontSize: 13 }}>—</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ marginTop: 24 }}>
+            <button style={cs.btnPrimary} onClick={() => { setNewPitcherName(""); setView("add-pitcher"); }}>+ Add Pitcher</button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════ ADD PITCHER ═══════ */}
+      {view === "add-pitcher" && (
+        <div style={{ padding: "24px 20px" }}>
+          <button onClick={() => setView("home")} style={cs.backBtn}>← Back</button>
+          <h2 style={{ fontFamily: "var(--font-display)", fontSize: 28, color: "var(--amber)", marginBottom: 28 }}>ADD PITCHER</h2>
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1, display: "block", marginBottom: 8, fontWeight: 600 }}>NAME</label>
+            <input type="text" placeholder="Pitcher name" value={newPitcherName}
+              style={cs.input}
+              onChange={e => setNewPitcherName(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && createPitcher()} autoFocus />
+          </div>
+          <button style={{ ...cs.btnPrimary, opacity: newPitcherName.trim() ? 1 : 0.4 }} onClick={createPitcher} disabled={!newPitcherName.trim()}>Add Pitcher</button>
+        </div>
+      )}
+
+      {/* ═══════ PITCHER DETAIL ═══════ */}
+      {view === "pitcher-detail" && selectedPitcher && (
+        <div style={{ padding: "24px 20px" }}>
+          <button onClick={() => setView("home")} style={cs.backBtn}>← Back</button>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
+            <h2 style={{ fontFamily: "var(--font-display)", fontSize: 30, color: "var(--text-1)", margin: 0 }}>{selectedPitcher.name}</h2>
+            <button onClick={() => setConfirmDelete({ message: `Delete ${selectedPitcher.name} and all their sessions?`, onConfirm: () => deletePitcher(selectedPitcher.id) })} style={{ background: "none", border: "none", color: "var(--text-4)", fontSize: 13, cursor: "pointer", fontFamily: "var(--font-body)", padding: "4px 8px" }}>Delete</button>
+          </div>
+
+          {(() => {
+            const ps = pitcherSessions(selectedPitcher.id);
+            const totalStrikes = ps.reduce((a, s) => a + s.strikes, 0);
+            const totalBalls = ps.reduce((a, s) => a + s.balls, 0);
+            const totalPitches = totalBalls + totalStrikes;
+            if (totalPitches === 0) return null;
+            return (
+              <div style={{ ...cs.card, textAlign: "center", marginBottom: 20 }}>
+                <StrikePercentage balls={totalBalls} strikes={totalStrikes} />
+                <div style={{ display: "flex", justifyContent: "center", gap: 32, marginTop: 12 }}>
+                  <div><div style={{ fontFamily: "var(--font-display)", fontSize: 22, color: "var(--text-1)" }}>{totalPitches}</div><div style={{ color: "var(--text-3)", fontSize: 11, letterSpacing: 1 }}>PITCHES</div></div>
+                  <div><div style={{ fontFamily: "var(--font-display)", fontSize: 22, color: "var(--amber)" }}>{totalStrikes}</div><div style={{ color: "var(--text-3)", fontSize: 11, letterSpacing: 1 }}>STRIKES</div></div>
+                  <div><div style={{ fontFamily: "var(--font-display)", fontSize: 22, color: "var(--blue)" }}>{totalBalls}</div><div style={{ color: "var(--text-3)", fontSize: 11, letterSpacing: 1 }}>BALLS</div></div>
+                </div>
+              </div>
+            );
+          })()}
+
+          <button style={{ ...cs.btnPrimary, marginBottom: 28 }} onClick={() => startSession(selectedPitcher)}>Start Bullpen Session</button>
+
+          {(() => {
+            const ps = pitcherSessions(selectedPitcher.id);
+            if (ps.length === 0) return <p style={{ color: "var(--text-4)", fontSize: 14, textAlign: "center", marginTop: 20 }}>No sessions yet — start one above</p>;
+            return (
+              <div>
+                <p style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1.5, marginBottom: 14, fontWeight: 600 }}>SESSION HISTORY</p>
+                {ps.map((s, i) => {
+                  const total = s.balls + s.strikes;
+                  const pct = total > 0 ? Math.round((s.strikes / total) * 100) : 0;
+                  return (
+                    <div key={s.id} style={{ ...cs.card, animation: `slideUp 0.3s ease ${i * 0.04}s both` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 600 }}>{fmtDate(s.date)}</div>
+                          <div style={{ color: "var(--text-3)", fontSize: 12, marginTop: 2 }}>{fmtTime(s.date)}</div>
+                          <div style={{ color: "var(--text-3)", fontSize: 13, marginTop: 6 }}>{total} pitches · {s.strikes}K / {s.balls}B</div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                          <span style={{ fontFamily: "var(--font-display)", fontSize: 28, color: pct >= 60 ? "var(--green)" : pct >= 50 ? "var(--amber)" : "var(--red)" }}>{pct}%</span>
+                          <button onClick={(e) => { e.stopPropagation(); setConfirmDelete({ message: `Delete session from ${fmtDate(s.date)}?`, onConfirm: () => deleteSession(s.id) }); }} style={{ background: "none", border: "none", color: "var(--text-4)", fontSize: 18, cursor: "pointer", padding: "4px 8px", lineHeight: 1 }}>×</button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ═══════ ACTIVE SESSION ═══════ */}
+      {view === "active-session" && activeSession && (
+        <div style={{ padding: "24px 20px", minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div>
+              <div style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1, fontWeight: 600 }}>BULLPEN SESSION</div>
+              <div style={{ fontFamily: "var(--font-display)", fontSize: 22, color: "var(--text-1)", marginTop: 2 }}>{selectedPitcher?.name}</div>
+            </div>
+            <button onClick={endSession} style={{ ...cs.btnSecondary, padding: "10px 18px", fontSize: 14 }}>End Session</button>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "center", margin: "24px 0 16px" }}>
+            <StrikePercentage balls={activeSession.balls} strikes={activeSession.strikes} />
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "center", gap: 40, marginBottom: 28 }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontFamily: "var(--font-display)", fontSize: 44, color: "var(--amber)" }}>{activeSession.strikes}</div>
+              <div style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1.5 }}>STRIKES</div>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontFamily: "var(--font-display)", fontSize: 44, color: "var(--blue)" }}>{activeSession.balls}</div>
+              <div style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1.5 }}>BALLS</div>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontFamily: "var(--font-display)", fontSize: 44, color: "var(--text-2)" }}>{activeSession.balls + activeSession.strikes}</div>
+              <div style={{ color: "var(--text-3)", fontSize: 12, letterSpacing: 1.5 }}>TOTAL</div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 16, marginBottom: 20, flex: "0 0 auto" }}>
+            <button onClick={addStrike} style={{ flex: 1, padding: "32px 0", borderRadius: 16, border: "2px solid var(--amber)", background: "var(--amber-glow)", color: "var(--amber)", fontFamily: "var(--font-display)", fontSize: 26, letterSpacing: 1, cursor: "pointer" }}>STRIKE</button>
+            <button onClick={addBall} style={{ flex: 1, padding: "32px 0", borderRadius: 16, border: "2px solid var(--blue)", background: "var(--blue-dim)", color: "var(--blue)", fontFamily: "var(--font-display)", fontSize: 26, letterSpacing: 1, cursor: "pointer" }}>BALL</button>
+          </div>
+
+          <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+            <button onClick={() => setActiveSession(p => p.strikes > 0 ? { ...p, strikes: p.strikes - 1 } : p)} disabled={activeSession.strikes === 0} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: activeSession.strikes > 0 ? "var(--text-3)" : "var(--text-4)", fontFamily: "var(--font-body)", fontSize: 13, cursor: "pointer" }}>Undo Strike</button>
+            <button onClick={() => setActiveSession(p => p.balls > 0 ? { ...p, balls: p.balls - 1 } : p)} disabled={activeSession.balls === 0} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--border)", background: "transparent", color: activeSession.balls > 0 ? "var(--text-3)" : "var(--text-4)", fontFamily: "var(--font-body)", fontSize: 13, cursor: "pointer" }}>Undo Ball</button>
+          </div>
+
+          {voice.hasSupport && (
+            <div style={{ marginTop: "auto", paddingTop: 16 }}>
+              <button onClick={voice.toggle} style={{
+                width: "100%", padding: "14px 0", borderRadius: 12,
+                border: voice.isListening ? "2px solid var(--red)" : "1px solid var(--border)",
+                background: voice.isListening ? "var(--red-dim)" : "var(--surface-1)",
+                color: voice.isListening ? "var(--red)" : "var(--text-2)",
+                fontFamily: "var(--font-body)", fontSize: 15, fontWeight: 600, cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8
+              }}>
+                <PulseIndicator active={voice.isListening} />
+                {voice.isListening ? 'Voice Active — say "strike" or "ball"' : "Enable Voice Commands"}
+              </button>
+              {voice.isListening && (
+                <p style={{ textAlign: "center", color: "var(--text-4)", fontSize: 12, marginTop: 8 }}>
+                  Say just "strike" or "ball" — full sentences are ignored
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<BullpenTracker />);
+</script>
+</body>
+</html>
