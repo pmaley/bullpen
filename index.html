@@ -154,14 +154,18 @@ function uid() {
 }
 
 // ─── Word matching sets ───
-// "Ball" is a short single-syllable word that speech recognition frequently mishears.
-// We accept a wide range of common misrecognitions to improve reliability.
+// Accepts "ball" or "miss" (and common misrecognitions of both).
+// "Miss" has sharp consonants and is much easier for speech recognition to pick up.
 const BALL_WORDS = new Set([
+  // "miss" and misrecognitions
+  "miss", "mis", "mist", "myth", "miz", "ms", "mrs",
+  "miss.", "missed", "midst", "mix", "bliss",
+  // "ball" and misrecognitions
   "ball", "bawl", "bald", "paul", "bull", "bowl", "bol",
   "baal", "baul", "bal", "boll", "bole", "boal", "baw",
   "fall", "call", "all", "hall", "wall", "tall", "mall",
   "y'all", "law", "pall", "pawl", "maul", "pol", "doll",
-  "bahl", "boll", "bole", "ball's", "balls",
+  "bahl", "ball's", "balls",
   "bought", "bot", "bolt", "baht",
   "bar", "bore", "raw", "bra"
 ]);
@@ -719,7 +723,7 @@ function BullpenTracker() {
               </button>
               {voice.isListening && (
                 <p style={{ textAlign: "center", color: "var(--text-4)", fontSize: 12, marginTop: 8, lineHeight: 1.6 }}>
-                  "strike" · "ball" · "undo" · "pitch count"
+                  "strike" · "miss" or "ball" · "undo" · "pitch count"
                 </p>
               )}
             </div>
